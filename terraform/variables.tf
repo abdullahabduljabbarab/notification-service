@@ -35,7 +35,7 @@ variable "notify_db_password" {
 }
 
 variable "wif_pool_id" {
-  description = "The shared GitHub Actions Workload Identity pool, created by the first service and referenced here"
+  description = "The shared GitHub Actions Workload Identity pool, owned by platform-infrastructure and referenced here"
   type        = string
   default     = "github-actions"
 }
