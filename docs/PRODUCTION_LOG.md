@@ -67,3 +67,47 @@ Milestone 2 onward. The full crash-after-send-before-commit regression through
 the service and Pub/Sub redelivery lands in M3, once the service layer and
 persistence exist; the provider-level primitive and its unit test are in place
 now.
+
+## Milestone 2: Persistence
+
+**Goal:** Durable delivery records and their attempt history, with the schema
+built by a migration and the tests run against that migrated schema so the ORM
+and the migration cannot silently drift apart.
+
+**Built:**
+- `app/models.py`: two tables.
+  - `notification_deliveries`: one row per (event_id, channel), unique on that
+    pair, which is the idempotency key that makes redelivery safe. Columns for
+    the routing context (payment_id, account_id, channel, destination), the
+    lifecycle (status, attempt_count, provider_reference, delivered_at), and the
+    trace (correlation_id, ABS-REQ-009). `status` is a plain string, not a
+    database enum, following the orchestrator's one live enum failure. An index
+    on payment_id backs the read API.
+  - `notification_attempts`: one row per send attempt (attempt_number, outcome,
+    error, attempted_at), foreign-keyed to its delivery with an ON DELETE
+    CASCADE and an index on delivery_id. This is the audit trail the read API
+    exposes.
+- `app/database.py`: engine and session factory (`pool_pre_ping`), and a
+  `get_db` dependency, matching the other services.
+- `alembic.ini`, `migrations/env.py`, `migrations/versions/001_initial.py`: the
+  migration that creates both tables, their unique constraint, foreign key, and
+  indexes. `env.py` prefers a harness-supplied URL, else the app's.
+- `tests/conftest.py`: self-bootstrapping test database on port 5435
+  (`notify_test`), dropped and re-migrated before each test via
+  `alembic upgrade head`, so every test runs against the migrated schema
+  (ADR-014). No app/client fixture yet; that arrives with the API in M3.
+
+**Tests:** +6 persistence tests (35 total).
+- A delivery persists and reads back with its defaults (pending, attempt_count
+  0, created_at set, delivered_at null).
+- The (event_id, channel) unique constraint rejects a duplicate on the same
+  channel and allows the same event on a second channel (the fan-out case).
+- Attempts are recorded in order under a delivery and read back through the
+  relationship.
+- An attempt against a non-existent delivery is rejected by the foreign key.
+- Deleting a delivery cascades to its attempts.
+
+**State:** `ruff check` clean, 35 tests passing, PostgreSQL 16 via
+docker-compose on port 5435. Schema is created by the migration and validated by
+the ORM in the same run. Next: M3, the service layer that applies an event to
+deliveries with per-channel dedup and provider-key sends, plus the API.
