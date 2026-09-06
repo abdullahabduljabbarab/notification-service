@@ -6,5 +6,9 @@ alembic==1.15.2
 pydantic==2.11.3
 python-dotenv==1.1.0
 httpx==0.28.1
+# Verifying the Pub/Sub push OIDC token. Only the auth library is needed: the
+# service receives events by HTTP push and never publishes, so it carries no
+# broker client.
+google-auth==2.57.1
 pytest==8.3.5
 ruff==0.11.12

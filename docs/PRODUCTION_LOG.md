@@ -111,3 +111,60 @@ and the migration cannot silently drift apart.
 docker-compose on port 5435. Schema is created by the migration and validated by
 the ORM in the same run. Next: M3, the service layer that applies an event to
 deliveries with per-channel dedup and provider-key sends, plus the API.
+
+## Milestone 3: Service and API
+
+**Integration finding (fixed first).** Wiring the consumer surfaced a contract
+defect in the producer, not in this service: the orchestrator's customer-facing
+events (`payment.settled`, `payment.failed`, `payment.rejected`) did not carry
+`account_id`, so a strict-sink consumer had no way to determine the recipient
+without calling back upstream, which ADR-001 forbids. This is genuine
+system-of-systems engineering: individually valid services, an insufficient
+integration contract. Corrected at the producer by adding `account_id` to those
+three payloads (additive, event_version unchanged), with two orchestrator
+contract tests and the ecosystem `EVENT_CATALOGUE.md` updated (which also now
+records that the notification service publishes no events). The consumer treats
+an event without `account_id` as ignored, so an older replayed event is acked
+rather than crashing it.
+
+**Built:**
+- `app/service.py`: `apply_event(db, envelope, channels)`, the consumer core. It
+  plans the event, and for each planned channel gets-or-creates the
+  (event_id, channel) delivery, skips it if already terminal, otherwise sends
+  with the channel's provider idempotency key, records the attempt, and advances
+  the status. The whole event applies in one transaction. It returns whether any
+  channel is still retryable, which the endpoint turns into a non-2xx so the
+  broker redelivers only the unfinished channels.
+- `app/providers.py`: `default_channels()`, the live simulated email/SMS
+  providers, built once as a process singleton so each provider's idempotency
+  store survives across requests and protects the crash window.
+- `app/schemas.py`: the Pub/Sub push envelope and the read-API response models.
+- `app/main.py`: FastAPI app. `GET /health`, `GET /notifications/{payment_id}`
+  (a payment's deliveries with their attempt history), and
+  `POST /events/pubsub`, the authenticated push consumer. Ingress verifies a
+  Google OIDC token for the configured push service account (skipped when
+  `PUBSUB_PUSH_SA` is unset, i.e. locally and in tests); the read and health
+  surfaces stay public.
+- `requirements.txt`: added `google-auth` (only the auth library, since the
+  service receives by push and never publishes).
+- `tests/conftest.py`: added `channels` (scripted, all-success) and `client`
+  fixtures, overriding the DB and channel dependencies.
+
+**Tests:** +19 (54 total).
+- `test_service.py`: fan-out to two channels with references and delivered_at;
+  correlation id carried onto deliveries; risk review to one email; an
+  uninteresting event ignored; an event without account_id ignored not crashed;
+  redelivery sends nothing again; a failed channel signals retry then succeeds;
+  a persistently failing channel dead-letters after the attempt limit with all
+  attempts recorded and no broker retry; and the crash-between-send-and-commit
+  regression proving exactly one real send across a redelivery.
+- `test_api.py`: health; push delivers and the read API shows it; push
+  idempotent across redelivery; push returns 503 when a channel wants retry;
+  push ignores an uninteresting event; 400s for invalid envelope and missing
+  data; ingress requires authentication when configured; read API empty for an
+  unknown payment.
+
+**State:** `ruff check` clean, 54 tests passing. The service is functionally
+complete end to end in-process. Next: M4, deployment (Dockerfile, CI against the
+migrated schema, Terraform with push subscriptions on the payment and risk
+topics plus a dead-letter, and Workload Identity Federation).
