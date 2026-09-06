@@ -8,7 +8,9 @@ python-dotenv==1.1.0
 httpx==0.28.1
 # Verifying the Pub/Sub push OIDC token. Only the auth library is needed: the
 # service receives events by HTTP push and never publishes, so it carries no
-# broker client.
+# broker client. google-auth's OIDC verification uses its requests transport,
+# so requests is a direct dependency here.
 google-auth==2.57.1
+requests==2.34.2
 pytest==8.3.5
 ruff==0.11.12

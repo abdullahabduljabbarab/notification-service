@@ -240,9 +240,11 @@ resource "google_pubsub_subscription_iam_member" "risk_dead_letter_subscribe" {
 # model) and are referenced here, not recreated; they move to
 # platform-infrastructure when it is consolidated. This service contributes only
 # its own least-privilege deploy account and the binding that lets its own
-# repository impersonate it.
-data "google_iam_workload_identity_pool" "github" {
-  workload_identity_pool_id = var.wif_pool_id
+# repository impersonate it. The pool has no data source, so its resource name
+# is composed from the project number, which is exactly what the pool's own
+# `name` attribute resolves to.
+locals {
+  wif_pool_name = "projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/${var.wif_pool_id}"
 }
 
 resource "google_service_account" "deploy" {
@@ -265,5 +267,5 @@ resource "google_project_iam_member" "deploy_roles" {
 resource "google_service_account_iam_member" "deploy_wif" {
   service_account_id = google_service_account.deploy.name
   role               = "roles/iam.workloadIdentityUser"
-  member             = "principalSet://iam.googleapis.com/${data.google_iam_workload_identity_pool.github.name}/attribute.repository/${var.github_owner}/${var.github_repo}"
+  member             = "principalSet://iam.googleapis.com/${local.wif_pool_name}/attribute.repository/${var.github_owner}/${var.github_repo}"
 }
