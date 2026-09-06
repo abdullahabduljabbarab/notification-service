@@ -75,6 +75,7 @@ jobs:
           --image europe-west2-docker.pkg.dev/ledger-api-507618/notification-service/notification-service
           --region europe-west2
           --allow-unauthenticated
+          --service-account notification-service-runtime@ledger-api-507618.iam.gserviceaccount.com
           --add-cloudsql-instances ledger-api-507618:europe-west2:ledger-db
           --set-env-vars ENVIRONMENT=production,PUBSUB_PUSH_SA=notify-pubsub-push@ledger-api-507618.iam.gserviceaccount.com
           --set-secrets DATABASE_URL=notify-database-url:latest

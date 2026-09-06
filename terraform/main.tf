@@ -64,15 +64,25 @@ resource "google_secret_manager_secret_version" "notify_database_url" {
   secret_data = "postgresql://${google_sql_user.notify.name}:${var.notify_db_password}@/${google_sql_database.notify.name}?host=/cloudsql/${data.google_sql_database_instance.ledger_db.connection_name}"
 }
 
+# Dedicated least-privilege runtime identity: the service runs as this account,
+# not the default compute service account. It holds only Cloud SQL Client and read
+# access to its own database-url secret. As a strict sink it never publishes, so it
+# has no Pub/Sub role.
 resource "google_service_account" "cloud_run" {
-  account_id   = "notification-runner"
-  display_name = "Notification Service Cloud Run"
+  account_id   = "notification-service-runtime"
+  display_name = "Notification Service Runtime"
 }
 
 resource "google_secret_manager_secret_iam_member" "cloud_run_database_url" {
   secret_id = google_secret_manager_secret.notify_database_url.id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.cloud_run.email}"
+}
+
+resource "google_project_iam_member" "cloud_run_cloudsql" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${google_service_account.cloud_run.email}"
 }
 
 resource "google_cloud_run_v2_service" "notification_service" {
