@@ -53,7 +53,33 @@ but Pub/Sub's at-least-once redelivery of event `E` must not produce:
 email  email  email
 ```
 
-The `(event_id, channel)` uniqueness makes the first true and the second impossible: a redelivery finds each channel's delivery already recorded and does not send it again.
+The `(event_id, channel)` uniqueness handles the ordinary case: a redelivery finds each channel's delivery already recorded and does not send it again.
+
+### The crash window between send and commit
+
+Database uniqueness alone is not enough, and it would be dishonest to claim it makes a double send impossible. A transaction cannot span an external network call, so this sequence exists:
+
+```
+1. delivery row is PENDING
+2. call the email provider  →  provider sends the message
+3. process crashes here      ✗  (before the commit)
+4. delivery is never marked DELIVERED
+5. Pub/Sub redelivers event E
+6. the service calls the email provider again
+```
+
+The row-level guard sees a delivery that is not yet terminal and drives the send a second time. Two real emails.
+
+The fix is provider-level idempotency layered on top of the database guard. Every send carries a deterministic key, `notification:{event_id}:{channel}`. A provider that has already succeeded for a key returns the original result rather than sending again, so the redelivery in step 6 produces no second message. A failed send is not recorded against the key, because it produced no side effect and must be genuinely retried.
+
+```
+app-level:       UNIQUE (event_id, channel)   prevents duplicate delivery rows
+provider-level:  key notification:{event_id}:{channel}   prevents duplicate side effect
+                 ─────────────────────────────────────
+                 together: safe redelivery across the send/commit crash window
+```
+
+This mirrors the ledger and orchestrator discipline: correctness does not rest on a database transaction pretending to include something it cannot.
 
 ## Delivery lifecycle
 
@@ -72,11 +98,43 @@ Each `(event_id, channel)` is a delivery that moves through a small state machin
      FAILED_RETRYABLE  DEAD_LETTERED
 ```
 
-A retryable failure returns a non-2xx from the push endpoint, so Pub/Sub redelivers the event and the service retries only the channels that have not yet delivered. Once every channel for an event is terminal (delivered or dead-lettered), the endpoint returns 2xx and the message is acknowledged. A Pub/Sub dead-letter topic is the outer backstop; the service's own `DEAD_LETTERED` state, reached after a maximum number of attempts, stops it retrying a channel that will never succeed.
+A retryable failure returns a non-2xx from the push endpoint, so Pub/Sub redelivers the event and the service retries only the channels that have not yet delivered. Once every channel for an event is terminal (delivered or dead-lettered), the endpoint returns 2xx and the message is acknowledged.
+
+### Two kinds of dead-lettering
+
+These are different levels and should not be confused.
+
+`DEAD_LETTERED` is an application state on a single channel's delivery. It means the service tried to send on that channel up to the attempt limit and the provider kept refusing, so the service gives up on that channel and stops retrying something that will not succeed. A message whose channels all reach a terminal state, including one that dead-lettered, is fully handled: the endpoint still returns 2xx and Pub/Sub still acks it. A dead-lettered email does not go to the Pub/Sub dead-letter topic; it is a recorded business outcome.
+
+```
+payment.settled E
+├── email → DELIVERED
+└── sms   → DEAD_LETTERED   (provider refused every attempt)
+all channels terminal → HTTP 2xx → Pub/Sub ACK
+```
+
+The Pub/Sub dead-letter topic is a transport-level backstop for a different failure: the service cannot process the message at all. The endpoint keeps returning non-2xx across the subscription's delivery attempts because the service is crashing, the database is unavailable, or the envelope is invalid. Only then does the broker route the message to its dead-letter topic for inspection. Channel exhaustion is normal and handled in-band; the broker DLQ is for the service being unable to do its job.
 
 ## The consumer
 
-Events arrive by Pub/Sub push at `POST /events/pubsub`. The handler validates the ABS envelope, plans the notifications the event is eligible for, and for each channel upserts a delivery keyed on `(event_id, channel)`, attempts the ones not already delivered, records the attempt and the resulting status, and returns 2xx or non-2xx based on whether any channel still wants a retry. Recording the delivery and the attempt is transactional, so the history never disagrees with what was sent.
+Events arrive by Pub/Sub push at `POST /events/pubsub`. The handler validates the ABS envelope, plans the notifications the event is eligible for, and for each channel upserts a delivery keyed on `(event_id, channel)`, attempts the ones not already delivered with their provider idempotency key, records the attempt and the resulting status, and returns 2xx or non-2xx based on whether any channel still wants a retry. Recording the delivery and the attempt is transactional, so the local history never disagrees with what the service believes it sent, and the provider key protects the one gap a transaction cannot cover.
+
+### Authenticated ingress
+
+`POST /events/pubsub` is the only privileged surface, and it is reachable only by the platform's own push subscription. Pub/Sub is configured to attach an OIDC token minted for a dedicated push service account, and the handler verifies that token at the application layer before doing any work.
+
+```
+Pub/Sub push subscription
+        │  OIDC token (push service account identity)
+        ▼
+POST /events/pubsub
+        │  verify token: issuer, audience, and that the email is the
+        │  expected push service account  →  else 401
+        ▼
+validate envelope → plan → deliver
+```
+
+This is the same ingress hardening the risk engine uses. The health check and the read API carry no such requirement and stay public, because they expose nothing that can move money or trigger a send.
 
 ## Data model
 
@@ -85,7 +143,7 @@ Events arrive by Pub/Sub push at `POST /events/pubsub`. The handler validates th
 
 ## The read API
 
-The public surface is deliberately tiny: `GET /health`, and `GET /notifications/{payment_id}`, which returns every delivery for a payment with its channel, status, attempt count, and the attempt history. There are no send commands, no templates, no preference management, and no authentication, because none of that is the point. This repo is about downstream consumption, fan-out, idempotent side effects, retries and isolation.
+The public surface is deliberately tiny: `GET /health`, and `GET /notifications/{payment_id}`, which returns every delivery for a payment with its channel, status, attempt count, and the attempt history. There are no send commands, no templates and no preference management, because none of that is the point. The only authenticated surface is the Pub/Sub ingest endpoint above; the read API is read-only over the service's own delivery records and stays public. This repo is about downstream consumption, fan-out, idempotent side effects, retries and isolation.
 
 ## Simulated channels
 

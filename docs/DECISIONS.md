@@ -109,3 +109,53 @@ client dependency, because it only receives and never publishes.
 Cloud Run. Push authentication is verified at the application layer, consistent
 with the risk engine's ingress. The service has no outbound broker path, which
 matches its sink-only design (ADR-001).
+
+## ADR-007: External side effects use deterministic provider idempotency keys
+
+**Status:** Accepted
+
+**Context:** The (event_id, channel) uniqueness constraint prevents duplicate
+delivery rows, but it cannot prevent a duplicate send. A database transaction
+cannot span an external network call, so there is a window where a provider
+sends the message and the process dies before the delivery is marked delivered.
+Pub/Sub redelivers the event, the guard sees a non-terminal delivery, and the
+service sends a second customer-facing message.
+
+**Decision:** Every provider send carries a deterministic idempotency key,
+`notification:{event_id}:{channel}`. A provider that has already succeeded for a
+key returns the original result instead of sending again. A failed send is not
+recorded against the key, because it produced no side effect and must be
+genuinely retried. Application-level uniqueness and provider-level idempotency
+are layered: the first stops duplicate rows, the second stops duplicate side
+effects.
+
+**Consequences:** Redelivery across the send/commit crash window produces no
+second message, which the (event_id, channel) constraint alone cannot promise.
+This is the one genuinely new systems idea this service contributes to ABS:
+reliable, idempotent external side effects that can fail independently of the
+system that caused them. It costs a key on the send contract and a small dedup
+store in the provider, and it keeps the codebase honest rather than claiming a
+transaction covers something it does not. The simulated providers implement it;
+a real provider exposes the same mechanism natively.
+
+## ADR-008: Application dead-lettering is distinct from the transport DLQ
+
+**Status:** Accepted
+
+**Context:** There are two failure levels, and conflating them makes the design
+confusing. A channel can exhaust its retries (a business outcome on one
+delivery), and the service can be unable to process a message at all (a
+transport failure on the whole event).
+
+**Decision:** `DEAD_LETTERED` is an application state on a single channel's
+delivery, reached after the attempt limit. A message whose channels are all
+terminal, including a dead-lettered one, is fully handled: the endpoint returns
+2xx and Pub/Sub acks it. The Pub/Sub dead-letter topic is a separate,
+transport-level backstop, reached only when the endpoint keeps returning non-2xx
+across the subscription's delivery attempts because the service is crashing, the
+database is unavailable, or the envelope is invalid.
+
+**Consequences:** Channel exhaustion is handled in-band and does not flood the
+broker DLQ, which stays reserved for the service genuinely failing to do its
+job. The two mechanisms are documented as distinct so a reader does not wonder
+why there appear to be two kinds of dead-lettering.
