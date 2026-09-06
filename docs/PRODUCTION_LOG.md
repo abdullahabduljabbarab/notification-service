@@ -214,3 +214,64 @@ wired; the live apply and end-to-end evidence are M5. Note for M5: the deploy
 job needs the `notification-service-deploy` account and its WIF binding to exist
 first, so Terraform is applied once before the first pushed deploy, exactly as
 the risk engine was brought up.
+
+## Milestone 5: Live deployment and evidence
+
+**Goal:** Bring the service up on the live ecosystem, prove the loop end to end,
+and write the README around the evidence.
+
+**Two CI fixes first (both only surfaced in CI, not locally):**
+- `requests` was an undeclared dependency. google-auth's OIDC verification
+  imports its requests transport; it was installed locally by chance, so the
+  suite passed here and failed in CI. Pinned it explicitly.
+- `google_iam_workload_identity_pool` is not a valid data source, so
+  `terraform validate` rejected it. Replaced it by composing the shared pool's
+  resource name from the project number, keeping the pool referenced, not
+  recreated.
+
+**Infrastructure brought up.** The ecosystem's infrastructure is provisioned
+with gcloud (there is no Terraform state; the Terraform is the declarative
+record). Created, mirroring the risk engine: the Artifact Registry repo, the
+`notification-service-deploy` account with its roles and the repository-scoped
+WIF binding, the `notify-pubsub-push` identity with the Pub/Sub token-creator
+binding, the dead-letter topic, the `notify` database and user on the shared
+Cloud SQL instance (generated password, stored only in Secret Manager), the
+connection secret with runtime access for the Cloud Run service account, and the
+two push subscriptions on `payment-events` and `risk-events`. One live gotcha:
+the connection-string secret first picked up a UTF-8 BOM from a shell stdin
+pipe, which broke SQLAlchemy URL parsing and failed the container's startup
+probe; it was re-stored as clean UTF-8 and the deploy went green.
+
+**Live verification.** Health returns `database: connected`; an unauthenticated
+call to `/events/pubsub` is refused with 401; both push subscriptions deliver to
+the service.
+
+**End-to-end proof on the live ecosystem.** A payment created at the orchestrator
+was scored by the risk engine, and the customer-facing outcome flowed over
+Pub/Sub to this service:
+- A **settled** payment (funded ledger account, fresh risk feed so the decision
+  was `allow`) fanned out to an **email and an SMS**, both delivered, both with
+  the account-derived destination and the payment's `correlation_id`.
+- A **review** payment was notified by **email**, and the delivery survived a
+  simulated provider failure live: attempt 1 failed, the endpoint returned 503,
+  Pub/Sub redelivered, attempt 2 delivered. Only the failed channel retried.
+- The held payment stayed in `risk_review` with no money moved; the settled
+  payment's money moved regardless of its notifications. The sink property,
+  demonstrated.
+- The `STATE_STALE` floor was observed directly: a fresh account was held at
+  review until the risk feed was freshened, after which the same profile was
+  allowed and settled.
+
+**Evidence captured** in `docs/images/`: Swagger overview, the settled email+SMS
+fan-out, the review email delivered after a retry, the 401 on the ingest
+endpoint, the Cloud Run service, the two push subscriptions, the Cloud SQL
+databases, Secret Manager, Artifact Registry and its image, the Workload
+Identity pool, and the deploy account bound to the repository.
+
+**README** written around the evidence, at parity with the ledger, orchestrator
+and risk engine.
+
+**State:** Live on Cloud Run at
+`https://notification-service-eppidgbmxa-nw.a.run.app`, keyless CI green,
+54 tests passing, wired into the ecosystem on both upstream topics. The
+notification service is complete.
