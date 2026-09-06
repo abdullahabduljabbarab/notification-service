@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff==0.11.12
+      - run: ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: notify
+          POSTGRES_PASSWORD: notify
+          POSTGRES_DB: notify
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U notify"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      # Verify the migration applies to a clean database on its own.
+      - run: alembic upgrade head
+        env:
+          DATABASE_URL: postgresql://notify:notify@localhost:5432/notify
+      # The suite builds its schema from the migrations too (ADR-014), so the
+      # ORM and the migration are exercised together, not only apart.
+      - run: pytest -v
+        env:
+          TEST_DATABASE_URL: postgresql://notify:notify@localhost:5432/notify_test
+
+  deploy:
+    needs: [lint, test]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      # Keyless auth via Workload Identity Federation: GitHub mints an OIDC
+      # token, GCP exchanges it to impersonate the deploy service account. No
+      # long-lived service-account key is stored in the repository.
+      - uses: google-github-actions/auth@v2
+        with:
+          project_id: ledger-api-507618
+          workload_identity_provider: projects/465847189589/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: notification-service-deploy@ledger-api-507618.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker europe-west2-docker.pkg.dev --quiet
+      - run: docker build -t europe-west2-docker.pkg.dev/ledger-api-507618/notification-service/notification-service .
+      - run: docker push europe-west2-docker.pkg.dev/ledger-api-507618/notification-service/notification-service
+      - run: >
+          gcloud run deploy notification-service
+          --image europe-west2-docker.pkg.dev/ledger-api-507618/notification-service/notification-service
+          --region europe-west2
+          --allow-unauthenticated
+          --add-cloudsql-instances ledger-api-507618:europe-west2:ledger-db
+          --set-env-vars ENVIRONMENT=production,PUBSUB_PUSH_SA=notify-pubsub-push@ledger-api-507618.iam.gserviceaccount.com
+          --set-secrets DATABASE_URL=notify-database-url:latest

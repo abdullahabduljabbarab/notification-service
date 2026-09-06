@@ -168,3 +168,49 @@ rather than crashing it.
 complete end to end in-process. Next: M4, deployment (Dockerfile, CI against the
 migrated schema, Terraform with push subscriptions on the payment and risk
 topics plus a dead-letter, and Workload Identity Federation).
+
+## Milestone 4: Deployment
+
+**Goal:** Ship the service to Cloud Run keylessly, consuming both upstream
+topics behind an authenticated push, with the whole footprint described in
+Terraform.
+
+**Built:**
+- `Dockerfile`, `start.sh`, `.dockerignore`: a slim Python 3.12 image that runs
+  `alembic upgrade head` then uvicorn on 8080, so the container migrates its own
+  schema on start. Tests, docs, and terraform are excluded from the image.
+- `.github/workflows/ci.yml`: lint, then test against a PostgreSQL service,
+  first applying the migration to a clean database on its own and then running
+  the suite against the migrated schema (ADR-014). On a push to main, a deploy
+  job authenticates via Workload Identity Federation (no stored key), builds and
+  pushes the image, and deploys to Cloud Run with the database URL from Secret
+  Manager and `PUBSUB_PUSH_SA` set so ingress authentication is enforced live.
+- `.github/workflows/terraform.yml`: fmt check, init, and validate on Ubuntu
+  (local validate is unreliable behind the TLS-inspecting network).
+- `terraform/`: the full footprint.
+  - Its own database and user on the shared ledger Cloud SQL instance; the
+    connection string is a single Secret Manager secret, never a plaintext env
+    var.
+  - Artifact Registry repo, a Cloud Run service (public invoker, since the read
+    and health surfaces are public and ingest is protected at the app layer),
+    and a runner service account with only secret access.
+  - A dedicated push identity (`notify-pubsub-push`) and two push subscriptions,
+    one on `payment-events` and one on `risk-events`, both delivering to
+    `/events/pubsub` with an OIDC token and a shared transport dead-letter topic
+    (ADR-009).
+  - A deploy service account with least-privilege roles, bound to the
+    notification-service repository through the shared Workload Identity pool,
+    which is referenced as a data source rather than recreated (ADR-010).
+  - The provider is pinned and the lock file carries cross-platform hashes so CI
+    init is reproducible.
+- No publish path, no broker client, no publisher IAM: the service is a strict
+  sink and the infrastructure reflects that (it only subscribes).
+
+**Decisions recorded:** ADR-009 (two subscriptions, one ingest endpoint),
+ADR-010 (shared WIF pool referenced, not owned).
+
+**State:** `ruff check` clean, 54 tests passing. Deployment is defined and CI is
+wired; the live apply and end-to-end evidence are M5. Note for M5: the deploy
+job needs the `notification-service-deploy` account and its WIF binding to exist
+first, so Terraform is applied once before the first pushed deploy, exactly as
+the risk engine was brought up.

@@ -159,3 +159,42 @@ database is unavailable, or the envelope is invalid.
 broker DLQ, which stays reserved for the service genuinely failing to do its
 job. The two mechanisms are documented as distinct so a reader does not wonder
 why there appear to be two kinds of dead-lettering.
+
+## ADR-009: Two push subscriptions into one ingest endpoint
+
+**Status:** Accepted
+
+**Context:** The service consumes from two topics owned by two other services:
+the orchestrator's `payment-events` and the risk engine's `risk-events`. It
+could take one endpoint per topic, or one endpoint for both.
+
+**Decision:** Two push subscriptions (`payment-events-to-notification`,
+`risk-events-to-notification`) both deliver to a single `POST /events/pubsub`.
+The handler already routes on `event_type`, so it does not care which topic a
+message came from. Both subscriptions carry the same OIDC push identity and
+share one transport dead-letter topic.
+
+**Consequences:** One authenticated, idempotent code path handles every inbound
+event regardless of source, and adding a third topic later is one more
+subscription, not new application code. The routing table stays the single place
+that decides what each event type produces.
+
+## ADR-010: The Workload Identity pool is shared and referenced, not owned
+
+**Status:** Accepted
+
+**Context:** The risk engine created the `github-actions` Workload Identity pool
+and provider for keyless CI deploys. Each ABS service needs its own deploy
+identity, but the pool and provider are account-wide, not per-service.
+
+**Decision:** This service references the existing pool with a data source and
+creates only its own least-privilege deploy service account
+(`notification-service-deploy`) and the binding that lets its own repository
+impersonate it. It does not recreate the pool or provider.
+
+**Consequences:** No collision with the risk engine's Terraform over a shared
+resource, and each service's state owns only what is truly its own. The shared
+pool is a known seam that moves into platform-infrastructure when the
+cross-cutting infrastructure is consolidated; until then, referencing it keeps
+each service deployable on its own while the ledger and orchestrator finish
+migrating off long-lived keys onto this same model.
