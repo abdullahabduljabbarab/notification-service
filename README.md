@@ -157,6 +157,19 @@ Because the ingest endpoint is the only surface that does work, it is authentica
 
 54 automated tests cover the fan-out routing, the channel providers and their idempotency, the delivery state machine, the apply-event service, the persistence, and the API. The suite builds its schema from the Alembic migrations, so the ORM and the migrations are exercised together, not only apart. On top of the unit tests the service was proven against its live deployment and the rest of the ecosystem.
 
+**Load test (Locust, live Cloud Run, 5 concurrent users, 60 seconds):**
+
+| Metric | Target | Measured |
+|--------|--------|----------|
+| Requests | | 824 |
+| Failures | 0 | 0 |
+| Read p50 | < 100ms | 45ms |
+| Read p95 | < 200ms | 53ms |
+| Health p50 | < 100ms | 41ms |
+| Throughput | > 5 req/s | 13.82 req/s |
+
+A read is one indexed lookup on `payment_id` with its attempts, no cross-service calls; the sends happen off the request on the asynchronous path. Details in [`docs/SLO.md`](docs/SLO.md).
+
 **The full ecosystem loop, live.** A payment created at the orchestrator flows through risk decisioning, and the customer-facing outcome flows over Pub/Sub to this service, which delivers it:
 
 - A **settled** payment fanned out to an **email and an SMS**, both delivered, both derived from the account, both carrying the payment's `correlation_id`.
@@ -180,7 +193,7 @@ correlation_id matches across the orchestrator, the risk engine and the notifica
 | Bounded retry then dead-letter | `test_a_failed_channel_signals_retry_then_succeeds`, `test_a_channel_that_keeps_failing_is_dead_lettered`; retry shown live |
 | The ORM and the migration agree | the persistence, service and API tests run against the Alembic-migrated schema (ADR-014) |
 
-The design, requirements, decisions and build history are in [`docs/`](docs/): [`DESIGN.md`](docs/DESIGN.md), [`REQUIREMENTS.md`](docs/REQUIREMENTS.md), [`MVP.md`](docs/MVP.md), [`DECISIONS.md`](docs/DECISIONS.md) and [`PRODUCTION_LOG.md`](docs/PRODUCTION_LOG.md).
+The full requirement-to-test mapping is in [`docs/VV_PLAN.md`](docs/VV_PLAN.md), the load-test write-up in [`docs/SLO.md`](docs/SLO.md), the engineering narrative in [`docs/ENGINEERING_REPORT.md`](docs/ENGINEERING_REPORT.md), and the STRIDE threat model in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md). The design, requirements, decisions and build history are in [`DESIGN.md`](docs/DESIGN.md), [`REQUIREMENTS.md`](docs/REQUIREMENTS.md), [`MVP.md`](docs/MVP.md), [`DECISIONS.md`](docs/DECISIONS.md), [`SECURITY.md`](docs/SECURITY.md) and [`PRODUCTION_LOG.md`](docs/PRODUCTION_LOG.md).
 
 ---
 
@@ -234,8 +247,9 @@ More decisions and their trade-offs are in [`docs/DECISIONS.md`](docs/DECISIONS.
 app/            FastAPI application, routing, channels, delivery state machine, service, consumer
 migrations/     Alembic migration (deliveries, attempts)
 terraform/      Notification service infrastructure as code, including the keyless WIF deploy identity
+scripts/        Load test harness
 tests/          54 tests: routing, channels, status, service, persistence, API
-docs/           Design, requirements, MVP, decisions, build log, evidence
+docs/           Design, requirements, MVP, decisions, engineering report, threat model, security, SLOs, V&V, build log, evidence
 ```
 
 ---

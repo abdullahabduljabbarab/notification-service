@@ -271,6 +271,14 @@ Identity pool, and the deploy account bound to the repository.
 **README** written around the evidence, at parity with the ledger, orchestrator
 and risk engine.
 
+**Docs brought to full parity.** Added the four docs the other services carry
+and this one was missing: `ENGINEERING_REPORT.md`, `SECURITY.md`,
+`THREAT_MODEL.md` (STRIDE) and `VV_PLAN.md`, plus `SLO.md` with a live load test.
+The load test (Locust, `scripts/loadtest.py`, 5 users, 60s against the read
+path) ran clean: 824 requests, 0 failures, read p50 45ms, p95 53ms, throughput
+13.82 req/s. The ingest endpoint is authenticated so it is exercised by the real
+subscriptions rather than the load tool.
+
 **State:** Live on Cloud Run at
 `https://notification-service-eppidgbmxa-nw.a.run.app`, keyless CI green,
 54 tests passing, wired into the ecosystem on both upstream topics. The
